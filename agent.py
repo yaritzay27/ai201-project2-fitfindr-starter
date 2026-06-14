@@ -18,6 +18,8 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -46,6 +48,94 @@ def _new_session(query: str, wardrobe: dict) -> dict:
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract a searchable description, optional size, and optional max price.
+
+    This parser is intentionally simple so the planning loop is easy to debug.
+    It handles the common project examples like "under $30", "size M",
+    "US 8", and "W30".
+    """
+    original = query.strip()
+    search_part = original.split(".")[0]
+
+    max_price = None
+    price_match = re.search(
+        r"(?:under|below|less than|max|maximum|up to)\s*\$?\s*(\d+(?:\.\d+)?)",
+        search_part,
+        flags=re.IGNORECASE,
+    )
+    if price_match:
+        max_price = float(price_match.group(1))
+
+    size = None
+    size_match = re.search(
+        r"\b(?:in\s+)?size\s+([a-zA-Z0-9./-]+)",
+        search_part,
+        flags=re.IGNORECASE,
+    )
+    if size_match:
+        size = size_match.group(1).upper()
+    else:
+        us_size_match = re.search(r"\bUS\s*\d+(?:\.\d+)?\b", search_part, re.IGNORECASE)
+        waist_match = re.search(r"\bW\d+\b", search_part, re.IGNORECASE)
+        if us_size_match:
+            size = us_size_match.group(0).upper()
+        elif waist_match:
+            size = waist_match.group(0).upper()
+
+    description = search_part
+    description = re.sub(
+        r"(?:under|below|less than|max|maximum|up to)\s*\$?\s*\d+(?:\.\d+)?",
+        " ",
+        description,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(
+        r"\b(?:in\s+)?size\s+[a-zA-Z0-9./-]+",
+        " ",
+        description,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(r"\bUS\s*\d+(?:\.\d+)?\b", " ", description, flags=re.IGNORECASE)
+    description = re.sub(r"\bW\d+\b", " ", description, flags=re.IGNORECASE)
+    description = re.sub(
+        r"\b(i am|i'm|im|looking for|look for|find me|show me|i want|want|a|an|the|please)\b",
+        " ",
+        description,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(r"[^a-zA-Z0-9\s-]", " ", description)
+    description = re.sub(r"\s+", " ", description).strip()
+
+    if not description:
+        description = original
+
+    return {
+        "description": description,
+        "size": size,
+        "max_price": max_price,
+    }
+
+
+def _format_search_error(parsed: dict) -> str:
+    description = parsed.get("description") or "that item"
+    constraints = []
+    if parsed.get("size"):
+        constraints.append(f"size {parsed['size']}")
+    if parsed.get("max_price") is not None:
+        constraints.append(f"under ${parsed['max_price']:.0f}")
+
+    constraint_text = ""
+    if constraints:
+        constraint_text = " " + " ".join(constraints)
+
+    return (
+        f"I couldn't find {description}{constraint_text}. "
+        "Try raising your budget, removing the size filter, or searching with a broader phrase."
+    )
+
 
 def run_agent(query: str, wardrobe: dict) -> dict:
     """
@@ -92,9 +182,41 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    parsed = _parse_query(query)
+    session["parsed"] = parsed
+
+    results = search_listings(
+        parsed["description"],
+        size=parsed["size"],
+        max_price=parsed["max_price"],
+    )
+    session["search_results"] = results
+
+    if not results:
+        session["error"] = _format_search_error(parsed)
+        return session
+
+    session["selected_item"] = results[0]
+    required_fields = ("title", "category", "price", "platform")
+    if any(field not in session["selected_item"] for field in required_fields):
+        session["error"] = "I found a listing, but it is missing details I need before I can style it."
+        return session
+
+    outfit = suggest_outfit(session["selected_item"], session["wardrobe"])
+    session["outfit_suggestion"] = outfit
+    if not outfit or not outfit.strip():
+        session["error"] = "I found an item, but I couldn't create an outfit suggestion for it."
+        return session
+
+    fit_card = create_fit_card(session["outfit_suggestion"], session["selected_item"])
+    if not fit_card or fit_card.startswith("I need an outfit suggestion"):
+        session["error"] = fit_card or "I need an outfit suggestion before I can write a fit card."
+        session["fit_card"] = None
+        return session
+
+    session["fit_card"] = fit_card
     return session
 
 
