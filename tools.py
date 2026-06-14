@@ -12,7 +12,9 @@ Tools:
     create_fit_card(outfit, new_item)               → str
 """
 
+import json
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -32,6 +34,50 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+def _call_llm(prompt: str, temperature: float = 0.7) -> str:
+    """Call Groq's Llama model and return the assistant text."""
+    client = _get_groq_client()
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are FitFindr, a concise secondhand fashion stylist. "
+                    "Give specific, practical styling advice in a casual voice."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=temperature,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def _normalize_words(text: str) -> list[str]:
+    """Return searchable lowercase words from a short text string."""
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _listing_search_text(listing: dict) -> str:
+    fields = [
+        listing.get("title"),
+        listing.get("description"),
+        listing.get("category"),
+        listing.get("size"),
+        listing.get("condition"),
+        listing.get("brand"),
+        listing.get("platform"),
+    ]
+    fields.extend(listing.get("style_tags") or [])
+    fields.extend(listing.get("colors") or [])
+    return " ".join(str(field) for field in fields if field)
+
+
+def _format_item(item: dict) -> str:
+    return json.dumps(item, indent=2, ensure_ascii=True)
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -69,8 +115,44 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    if not description or not description.strip():
+        return []
+
+    query = description.lower().strip()
+    query_words = set(_normalize_words(query))
+    matches = []
+
+    for listing in load_listings():
+        if max_price is not None and listing.get("price", 0) > max_price:
+            continue
+
+        if size:
+            requested_size = size.lower().strip()
+            listing_size = str(listing.get("size", "")).lower()
+            if requested_size not in listing_size and listing_size not in requested_size:
+                continue
+
+        search_text = _listing_search_text(listing).lower()
+        search_words = set(_normalize_words(search_text))
+        overlap = query_words & search_words
+        score = len(overlap)
+
+        if query in search_text:
+            score += 3
+
+        title = str(listing.get("title", "")).lower()
+        tags = " ".join(listing.get("style_tags") or []).lower()
+        for word in query_words:
+            if word in title:
+                score += 2
+            if word in tags:
+                score += 2
+
+        if score > 0:
+            matches.append((score, listing))
+
+    matches.sort(key=lambda scored: (-scored[0], scored[1].get("price", 0)))
+    return [listing for _, listing in matches]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +182,49 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not new_item or not isinstance(new_item, dict):
+        return "I found a listing, but I don't have enough item details to style it yet."
+
+    title = new_item.get("title")
+    if not title:
+        return "I found a listing, but I don't have enough item details to style it yet."
+
+    wardrobe_items = (wardrobe or {}).get("items") or []
+
+    if not wardrobe_items:
+        prompt = f"""
+Suggest 1 complete outfit idea for this thrifted item.
+
+New item:
+{_format_item(new_item)}
+
+The user has not entered wardrobe items yet, so do not pretend they own specific pieces.
+Recommend general categories, silhouettes, colors, shoes, and styling details that would pair well.
+Keep it to 3-5 sentences.
+"""
+    else:
+        wardrobe_text = "\n".join(
+            f"- {item.get('name')} ({item.get('category')}; colors: {', '.join(item.get('colors') or [])}; "
+            f"tags: {', '.join(item.get('style_tags') or [])}; notes: {item.get('notes') or 'none'})"
+            for item in wardrobe_items
+        )
+        prompt = f"""
+Suggest 1-2 complete outfits using this thrifted item and named pieces from the user's wardrobe.
+
+New item:
+{_format_item(new_item)}
+
+User wardrobe:
+{wardrobe_text}
+
+Use specific wardrobe item names when possible. Include practical styling details like cuffing,
+tucking, layering, shoes, or accessories. Keep the answer concise and useful.
+"""
+
+    try:
+        return _call_llm(prompt, temperature=0.7)
+    except Exception as exc:
+        return f"I couldn't generate an outfit suggestion right now: {exc}"
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +256,30 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not str(outfit).strip():
+        return "I need an outfit suggestion before I can write a fit card."
+
+    if not new_item or not isinstance(new_item, dict):
+        return "I need item details before I can write a fit card."
+
+    prompt = f"""
+Write a short shareable outfit caption for a thrifted find.
+
+New item:
+{_format_item(new_item)}
+
+Outfit suggestion:
+{outfit}
+
+Requirements:
+- 1-3 sentences.
+- Casual and authentic, like an outfit post caption.
+- Mention the item name, price, and platform naturally if available.
+- Capture the outfit vibe with specific styling language.
+- Do not sound like a store product description.
+"""
+
+    try:
+        return _call_llm(prompt, temperature=0.95)
+    except Exception as exc:
+        return f"I couldn't create a fit card right now: {exc}"
