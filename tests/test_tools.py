@@ -1,4 +1,4 @@
-from tools import create_fit_card, search_listings, suggest_outfit
+from tools import compare_price, create_fit_card, search_listings, suggest_outfit
 from utils.data_loader import get_empty_wardrobe, get_example_wardrobe
 
 
@@ -74,3 +74,14 @@ def test_create_fit_card_empty_outfit():
     fit_card = create_fit_card("", {"title": "Vintage Band Tee"})
 
     assert fit_card == "I need an outfit suggestion before I can write a fit card."
+
+
+def test_compare_price_returns_reasoning():
+    new_item = search_listings("vintage graphic tee", max_price=50)[0]
+
+    assessment = compare_price(new_item)
+
+    assert assessment["assessment"] in {"good deal", "fair price", "pricey", "unknown"}
+    assert assessment["item_price"] == new_item["price"]
+    assert assessment["comparable_count"] > 0
+    assert "similar" in assessment["reasoning"]

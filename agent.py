@@ -20,7 +20,35 @@ Usage (once implemented):
 
 import re
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import compare_price, search_listings, suggest_outfit, create_fit_card
+
+
+STYLE_PROFILE = {
+    "preferences": [],
+}
+
+STYLE_KEYWORDS = [
+    "baggy",
+    "chunky",
+    "classic",
+    "cottagecore",
+    "dark academia",
+    "earth tones",
+    "grunge",
+    "minimal",
+    "oversized",
+    "preppy",
+    "streetwear",
+    "vintage",
+    "wide-leg",
+    "y2k",
+]
+
+
+def reset_style_profile() -> str:
+    """Clear remembered style preferences for the running app session."""
+    STYLE_PROFILE["preferences"] = []
+    return "Style memory reset."
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -40,7 +68,10 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "parsed": {},                # extracted description / size / max_price
         "search_results": [],        # list of matching listing dicts
         "selected_item": None,       # top result, passed into suggest_outfit
+        "price_assessment": None,    # price comparison for selected_item
         "wardrobe": wardrobe,        # user's wardrobe dict
+        "style_profile": {},         # remembered style preferences for this app session
+        "retry_info": None,          # explains fallback search if one was used
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
@@ -137,6 +168,98 @@ def _format_search_error(parsed: dict) -> str:
     )
 
 
+def _remember_style_preferences(query: str) -> list[str]:
+    query_lower = query.lower()
+    found = []
+    for keyword in STYLE_KEYWORDS:
+        if keyword in query_lower and keyword not in STYLE_PROFILE["preferences"]:
+            STYLE_PROFILE["preferences"].append(keyword)
+            found.append(keyword)
+    return found
+
+
+def _profile_for_session(query: str) -> dict:
+    remembered_now = _remember_style_preferences(query)
+    return {
+        "preferences": list(STYLE_PROFILE["preferences"]),
+        "remembered_now": remembered_now,
+        "used_memory": bool(STYLE_PROFILE["preferences"] and not remembered_now),
+    }
+
+
+def _wardrobe_with_style_profile(wardrobe: dict, style_profile: dict) -> dict:
+    if not style_profile.get("preferences"):
+        return wardrobe
+
+    enriched = dict(wardrobe or {})
+    enriched["style_profile"] = style_profile
+    return enriched
+
+
+def _search_with_retry(parsed: dict) -> tuple[list[dict], dict | None]:
+    original = {
+        "description": parsed["description"],
+        "size": parsed["size"],
+        "max_price": parsed["max_price"],
+    }
+
+    results = search_listings(
+        original["description"],
+        size=original["size"],
+        max_price=original["max_price"],
+    )
+    if results:
+        return results, None
+
+    attempts = []
+
+    if original["size"] is not None:
+        attempts.append({
+            "description": original["description"],
+            "size": None,
+            "max_price": original["max_price"],
+            "adjustment": f"removed size filter {original['size']}",
+        })
+
+    if original["max_price"] is not None:
+        attempts.append({
+            "description": original["description"],
+            "size": None,
+            "max_price": None,
+            "adjustment": "removed size and price filters",
+        })
+
+    for attempt in attempts:
+        retry_results = search_listings(
+            attempt["description"],
+            size=attempt["size"],
+            max_price=attempt["max_price"],
+        )
+        if retry_results:
+            retry_info = {
+                "original": original,
+                "adjustment": attempt["adjustment"],
+                "retried_with": {
+                    "description": attempt["description"],
+                    "size": attempt["size"],
+                    "max_price": attempt["max_price"],
+                },
+                "message": f"No exact match found, so I retried and {attempt['adjustment']}.",
+            }
+            return retry_results, retry_info
+
+    return [], {
+        "original": original,
+        "adjustment": "removed size and price filters",
+        "retried_with": {
+            "description": original["description"],
+            "size": None,
+            "max_price": None,
+        },
+        "message": "I retried with loosened filters but still could not find a match.",
+    }
+
+
 def run_agent(query: str, wardrobe: dict) -> dict:
     """
     Main agent entry point. Runs the FitFindr planning loop for a single
@@ -186,25 +309,28 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 
     parsed = _parse_query(query)
     session["parsed"] = parsed
+    session["style_profile"] = _profile_for_session(query)
 
-    results = search_listings(
-        parsed["description"],
-        size=parsed["size"],
-        max_price=parsed["max_price"],
-    )
+    results, retry_info = _search_with_retry(parsed)
     session["search_results"] = results
+    session["retry_info"] = retry_info
 
     if not results:
         session["error"] = _format_search_error(parsed)
         return session
 
     session["selected_item"] = results[0]
+    session["price_assessment"] = compare_price(session["selected_item"])
     required_fields = ("title", "category", "price", "platform")
     if any(field not in session["selected_item"] for field in required_fields):
         session["error"] = "I found a listing, but it is missing details I need before I can style it."
         return session
 
-    outfit = suggest_outfit(session["selected_item"], session["wardrobe"])
+    wardrobe_for_outfit = _wardrobe_with_style_profile(
+        session["wardrobe"],
+        session["style_profile"],
+    )
+    outfit = suggest_outfit(session["selected_item"], wardrobe_for_outfit)
     session["outfit_suggestion"] = outfit
     if not outfit or not outfit.strip():
         session["error"] = "I found an item, but I couldn't create an outfit suggestion for it."

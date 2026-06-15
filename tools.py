@@ -155,6 +155,79 @@ def search_listings(
     return [listing for _, listing in matches]
 
 
+def compare_price(new_item: dict) -> dict:
+    """
+    Compare a selected listing price against similar listings in the dataset.
+
+    Similar listings share the same category and at least one style tag. If no
+    tag-level comparables exist, the comparison falls back to category matches.
+    """
+    if not new_item or not isinstance(new_item, dict) or "price" not in new_item:
+        return {
+            "assessment": "unknown",
+            "reasoning": "I need a selected item with a price before I can compare it.",
+            "item_price": None,
+            "average_comparable_price": None,
+            "comparable_count": 0,
+            "comparable_titles": [],
+        }
+
+    category = new_item.get("category")
+    item_tags = set(new_item.get("style_tags") or [])
+    item_id = new_item.get("id")
+
+    category_matches = [
+        item for item in load_listings()
+        if item.get("id") != item_id and item.get("category") == category
+    ]
+    comparable_items = [
+        item for item in category_matches
+        if item_tags & set(item.get("style_tags") or [])
+    ]
+    if not comparable_items:
+        comparable_items = category_matches
+
+    if not comparable_items:
+        return {
+            "assessment": "unknown",
+            "reasoning": "I could not find similar listings in the dataset to compare prices.",
+            "item_price": new_item.get("price"),
+            "average_comparable_price": None,
+            "comparable_count": 0,
+            "comparable_titles": [],
+        }
+
+    prices = [item["price"] for item in comparable_items]
+    average_price = sum(prices) / len(prices)
+    item_price = new_item["price"]
+
+    if item_price <= average_price * 0.9:
+        assessment = "good deal"
+        comparison = "below"
+    elif item_price >= average_price * 1.1:
+        assessment = "pricey"
+        comparison = "above"
+    else:
+        assessment = "fair price"
+        comparison = "close to"
+
+    comparable_titles = [item["title"] for item in comparable_items[:3]]
+    reasoning = (
+        f"This item is ${item_price:.2f}, which is {comparison} the "
+        f"${average_price:.2f} average for {len(comparable_items)} similar "
+        f"{category} listings."
+    )
+
+    return {
+        "assessment": assessment,
+        "reasoning": reasoning,
+        "item_price": item_price,
+        "average_comparable_price": round(average_price, 2),
+        "comparable_count": len(comparable_items),
+        "comparable_titles": comparable_titles,
+    }
+
+
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
 
 def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
@@ -190,6 +263,15 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         return "I found a listing, but I don't have enough item details to style it yet."
 
     wardrobe_items = (wardrobe or {}).get("items") or []
+    style_profile = (wardrobe or {}).get("style_profile") or {}
+    preferences = style_profile.get("preferences") or []
+    preference_text = ""
+    if preferences:
+        preference_text = (
+            "\nRemembered style preferences for this user: "
+            + ", ".join(preferences)
+            + ". Use these preferences when choosing the vibe and styling details.\n"
+        )
 
     if not wardrobe_items:
         prompt = f"""
@@ -197,6 +279,7 @@ Suggest 1 complete outfit idea for this thrifted item.
 
 New item:
 {_format_item(new_item)}
+{preference_text}
 
 The user has not entered wardrobe items yet, so do not pretend they own specific pieces.
 Recommend general categories, silhouettes, colors, shoes, and styling details that would pair well.
@@ -216,6 +299,7 @@ New item:
 
 User wardrobe:
 {wardrobe_text}
+{preference_text}
 
 Use specific wardrobe item names when possible. Include practical styling details like cuffing,
 tucking, layering, shoes, or accessories. Keep the answer concise and useful.

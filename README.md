@@ -76,6 +76,21 @@ Output:
 - A 1-3 sentence caption that mentions the thrifted item, price/platform when available, and the outfit vibe.
 - If the outfit string is empty, it returns: "I need an outfit suggestion before I can write a fit card."
 
+### compare_price(new_item)
+
+Purpose: compares the selected listing's price against similar listings in the dataset.
+
+Inputs:
+
+- new_item (dict): the selected listing from `search_listings`
+
+Output:
+
+- A dictionary with assessment, reasoning, item_price, average_comparable_price, comparable_count, and comparable_titles.
+- The assessment is "good deal", "fair price", "pricey", or "unknown".
+
+Comparisons are made by looking for listings in the same category that share at least one style tag with the selected item. If there are no tag-level matches, the tool falls back to other listings in the same category. It then compares the selected item's price to the average comparable price.
+
 ## Planning Loop
 
 The planning loop lives in `agent.py` inside `run_agent(query, wardrobe)`.
@@ -87,7 +102,9 @@ After search, the first major branch happens:
 - If search returns an empty list, the agent sets `session["error"]` with a helpful message and returns early.
 - If search returns results, the agent stores the full list in `session["search_results"]` and stores the top result in `session["selected_item"]`.
 
-Only after a selected item exists does the agent call `suggest_outfit`. The outfit suggestion is stored in `session["outfit_suggestion"]`.
+If the first search returns no results, the agent retries automatically with loosened filters before giving up. First it removes the size filter if one was provided. If that still fails and a max price was provided, it removes both size and price filters. The session stores this in `session["retry_info"]` so the app can tell the user what was adjusted.
+
+Only after a selected item exists does the agent call `compare_price` and `suggest_outfit`. The price assessment is stored in `session["price_assessment"]`, and the outfit suggestion is stored in `session["outfit_suggestion"]`.
 
 Only after an outfit suggestion exists does the agent call `create_fit_card`. The final caption is stored in `session["fit_card"]`.
 
@@ -101,7 +118,10 @@ The session dictionary is the shared state object for one full interaction. It s
 - parsed: extracted description, size, and max_price
 - search_results: all matching listings returned by search
 - selected_item: the top listing selected from search_results
+- price_assessment: the result from compare_price for the selected item
 - wardrobe: the wardrobe passed into the agent
+- style_profile: remembered style preferences for the current running app session
+- retry_info: what filter was loosened if fallback search was used
 - outfit_suggestion: text returned by suggest_outfit
 - fit_card: caption returned by create_fit_card
 - error: message set when the workflow stops early
@@ -113,6 +133,32 @@ search_listings -> selected_item -> suggest_outfit -> outfit_suggestion -> creat
 ```
 
 The user does not have to re-enter the selected item or outfit between steps. The agent passes the stored session values forward.
+
+## Stretch Features
+
+### Price comparison
+
+After the agent selects the top listing, it calls `compare_price(selected_item)`. The tool compares that item to other listings from the same category and, when possible, the same style tags. The app displays whether the selected listing looks like a good deal, fair price, or pricey, along with the average price and example comparable listings.
+
+Example: if the selected item is a top priced at $18 and similar tops average around $25, the tool can mark it as a good deal and explain that it is below the comparable average.
+
+### Style profile memory
+
+FitFindr stores a lightweight style profile in memory while the app is running. The profile is a list of style keywords found in previous user queries, such as baggy, chunky, grunge, streetwear, y2k, or minimal.
+
+For example, if the first query says "I mostly wear baggy jeans and chunky sneakers," the agent stores baggy and chunky. In a later query like "black tee under $30," the user does not have to repeat those preferences. The agent passes the remembered profile into `suggest_outfit`, and the app shows the remembered style memory in the listing panel.
+
+This memory is stored in a module-level dictionary in `agent.py`, so it lasts while the app process is running. It is not saved permanently after the app stops.
+
+### Retry logic with fallback
+
+If search returns no results, the agent retries automatically with loosened constraints. For example, a query like:
+
+```text
+90s jacket size XS under $10
+```
+
+may fail because the size and budget are too strict. The agent then retries by removing the size filter, and if needed removes both size and price filters. If the retry succeeds, the app explains what was adjusted. If it still fails, the agent returns a helpful no-results message.
 
 ## Error Handling
 

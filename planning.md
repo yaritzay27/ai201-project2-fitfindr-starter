@@ -100,7 +100,25 @@ If outfit is empty, whitespace, or None, the tool returns a clear error string i
 
 ### Additional Tools (if any)
 
-No additional tools are planned for the required build.
+### Stretch Tool: compare_price
+
+**What it does:**
+Compares the selected listing price against similar listings in the dataset.
+
+**Input parameters:**
+- new_item (dict): The selected listing dictionary from search_listings.
+
+**What it returns:**
+A dictionary with assessment, reasoning, item_price, average_comparable_price, comparable_count, and comparable_titles. Similar listings are chosen by same category and shared style tags, with same-category listings as a fallback.
+
+**What happens if it fails or returns nothing:**
+If the item is missing price details or there are no comparable listings, it returns assessment="unknown" with a reasoning message instead of crashing.
+
+### Stretch Features
+
+- Price comparison: after selected_item is chosen, the agent calls compare_price(selected_item) and stores the result in session["price_assessment"].
+- Style profile memory: the agent stores style keywords from previous queries in a module-level style profile while the app is running. Later queries can use those remembered preferences without the user re-entering them.
+- Retry logic with fallback: if the first search returns no results, the agent retries by removing the size filter, then by removing both size and max_price if needed. The adjustment is stored in session["retry_info"].
 
 ---
 
@@ -118,11 +136,14 @@ The agent uses one session dictionary for a single user request and advances thr
    Store these values in session["parsed"].
 3. Call search_listings(description, size, max_price) and store the returned list in session["search_results"].
 4. If session["search_results"] is empty:
-   - Set session["error"] to a specific message that includes the main search phrase and any budget/size constraints.
+   - Retry once with loosened constraints: remove the size filter first, then remove both size and max_price if needed.
+   - Store the adjustment in session["retry_info"].
+   - If retry still returns no results, set session["error"] to a specific message that includes the main search phrase and any budget/size constraints.
    - Return the session immediately.
    - Do not call suggest_outfit with empty input.
 5. If results exist:
    - Set session["selected_item"] = session["search_results"][0].
+   - Call compare_price(selected_item) and store it in session["price_assessment"].
    - Continue to the outfit step.
 6. Validate that session["selected_item"] has at least title, category, price, and platform.
    - If not, set session["error"] = "I found a listing, but it is missing details I need before I can style it." and return early.
@@ -146,7 +167,10 @@ State is stored in a single session dictionary created by _new_session(query, wa
 - parsed (dict): Parsed search parameters, with keys description, size, and max_price.
 - search_results (list[dict]): Full list returned by search_listings.
 - selected_item (dict | None): The top search result, passed into suggest_outfit and create_fit_card.
+- price_assessment (dict | None): Price comparison for selected_item.
 - wardrobe (dict): The user's wardrobe input, usually from get_example_wardrobe() or get_empty_wardrobe().
+- style_profile (dict): Remembered style preferences from previous queries during the same app run.
+- retry_info (dict | None): The loosened filters used if fallback search was needed.
 - outfit_suggestion (str | None): Text returned by suggest_outfit.
 - fit_card (str | None): Caption returned by create_fit_card.
 - error (str | None): A user-facing explanation when the workflow stops early.
@@ -161,7 +185,7 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| search_listings | No results match the query | Set session["error"] to a message like "I couldn't find a vintage graphic tee under $30. Try raising your budget, removing the size filter, or searching for a broader phrase like 'graphic tee'." Return the session immediately and do not call later tools. |
+| search_listings | No results match the query | Retry with loosened filters first and store the adjustment in session["retry_info"]. If retry still finds nothing, set session["error"] to a message like "I couldn't find a vintage graphic tee under $30. Try raising your budget, removing the size filter, or searching for a broader phrase like 'graphic tee'." Return the session and do not call later tools. |
 | suggest_outfit | Wardrobe is empty | Continue instead of failing. The tool returns general styling advice for the selected item, naming useful categories or silhouettes instead of specific wardrobe pieces, then the agent still calls create_fit_card. |
 | suggest_outfit | Selected listing is missing required item details | Set session["error"] to "I found a listing, but I don't have enough item details to style it yet." Return early before fit-card generation. |
 | create_fit_card | Outfit input is missing or incomplete | Store "I need an outfit suggestion before I can write a fit card." in session["error"], leave session["fit_card"] = None, and return the session. |
